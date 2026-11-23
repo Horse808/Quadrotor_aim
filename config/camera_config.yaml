@@ -1,0 +1,43 @@
+%YAML:1.0
+---
+# GC4653 的 1280x720@60 模式由传感器配置单独设定；VPSS 应缩放到此处理分辨率。
+input_width: 640
+input_height: 360
+
+# 灰度兼容模式使用的阈值；主识别路径使用下方的 HSV 绿色参数。
+light_threshold: 200
+light_min_area: 10
+light_max_area: 5000
+light_min_circularity: 0.55
+# HSV 绿色范围（OpenCV 中 H：0-179，S/V：0-255）。
+green_hue_min: 35
+green_hue_max: 95
+green_saturation_min: 60
+green_value_min: 45
+min_green_ratio: 0.45
+light_max_aspect_ratio_diff: 0.30
+
+
+# GC4653 针孔相机标定结果，图片来自 camera_calibration/photo0，标定分辨率为 1280x720。
+# 当前程序处理分辨率为 640x360，因此 camera_matrix 中的焦距和主点已缩放为原值的 0.5。
+# 畸变系数与图像分辨率无关，保持标定时的原值。
+calibration_image_width: 1280
+calibration_image_height: 720
+camera_matrix: !!opencv-matrix
+  rows: 3
+  cols: 3
+  dt: d
+  data: [ 370.67578642315704, 0., 305.03043609234527,
+          0., 370.61711564066184, 203.48602703330866,
+          0., 0., 1. ]
+dist_coeffs: !!opencv-matrix
+  rows: 1
+  cols: 5
+  dt: d
+  data: [ -2.0454953930577481e-02, 1.1627804623221077e-01,
+          -1.2751140187294986e-03, -1.0165161024278681e-03,
+          -4.0178456032675741e-01 ]
+calibration_reprojection_error: 6.1312375248383799e-01
+calibration_checkerboard_cols: 9
+calibration_checkerboard_rows: 6
+calibration_square_size_m: 2.5999999999999999e-02

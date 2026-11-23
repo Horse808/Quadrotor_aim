@@ -1,0 +1,56 @@
+%YAML:1.0
+---
+# 飞控串口与 MAVLink 通信参数
+# 飞控串口设备路径
+serial_device: "/dev/ttyS1"
+# 串口波特率
+baud_rate: 230400
+# 飞控消息请求与速度指令发送频率，单位：赫兹
+send_rate_hz: 20
+# 飞控命令等待确认的超时时间，单位：毫秒
+message_timeout_ms: 5000
+# 起飞前心跳和光流数据需连续有效的时间，单位：秒
+preflight_stable_seconds: 5
+
+# 飞行任务参数；高度、距离单位为米，速度单位为米/秒，角速度单位为度/秒
+# 起飞阶段的目标高度
+takeoff_height_m: 1.0
+# 起飞阶段的垂直上升速度
+takeoff_speed_mps: 0.08
+# 搜索阶段需要维持的目标高度
+search_height_m: 1.0
+# 搜索目标的最长持续时间，超时后进入降落阶段，单位：秒
+search_timeout_seconds: 20.0
+# 搜索阶段的偏航旋转速度
+search_yaw_speed_deg_s: 30.0
+# 无人机到引导灯的目标距离，到达后开始稳定计时，单位：米
+target_distance_m: 0.50
+# 目标距离允许误差，单位：米
+target_distance_tolerance_m: 0.06
+# 引导灯左右方向的位置允许误差，单位：米
+lateral_tolerance_m: 0.06
+# 引导灯上下方向的位置允许误差，单位：米
+vertical_tolerance_m: 0.06
+# 到达目标位置后需连续稳定的时间，满足后进入降落阶段，单位：秒
+target_hold_seconds: 5.0
+# 跟踪阶段的最大前后平移速度
+forward_speed_mps: 0.12
+# 跟踪阶段的最大左右平移速度
+lateral_speed_mps: 0.10
+# 跟踪阶段的最大上下移动速度
+vertical_speed_mps: 0.08
+# 降落阶段的下降速度
+landing_speed_mps: 0.04
+# 光流测得离地高度达到此值时触发强制解除武装（停桨），单位：米
+landing_stop_height_m: 0.15
+# 跟踪位置误差的控制增益
+position_gain: 0.25
+# 跟踪垂直误差的控制增益
+vertical_gain: 0.25
+# 搜索阶段高度误差的控制增益
+height_gain: 0.25
+
+# 引导灯圆形外径，用于根据成像尺寸估算距离，单位：米（55 毫米）
+light_diameter_m: 0.055
+# 状态与遥测信息的输出间隔，单位：秒
+log_interval_seconds: 2.0
