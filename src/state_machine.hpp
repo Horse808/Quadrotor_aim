@@ -27,17 +27,22 @@ struct VisionTarget {
 struct StateMachineConfig {
     float takeoff_height_m = 1.0f;
     float search_height_m = 1.0f;
+    // 搜索阶段目标高度的上下允许误差，单位米。
+    float height_tolerance_m = 0.06f;
     float target_distance_m = 0.50f;
     float target_distance_tolerance_m = 0.06f;
     float lateral_tolerance_m = 0.06f;
     float vertical_tolerance_m = 0.06f;
     float hold_seconds = 5.0f;
     float search_timeout_seconds = 30.0f;
+    float target_loss_hold_seconds = 1.5f;
     // 光流/测距高度低于 10 cm 时停止下降并请求停桨。
     float landing_height_m = 0.10f;
     float max_forward_speed_mps = 0.12f;
     float max_lateral_speed_mps = 0.10f;
+    // 对应 vertical_speed_mps：悬停向上速度，同时限制视觉垂直对齐速度。
     float max_vertical_speed_mps = 0.08f;
+    // 起飞及搜索高度超出容差时的修正速度，不受上述视觉速度上限限制。
     float takeoff_speed_mps = 0.08f;
     float landing_speed_mps = 0.04f;
     float max_search_yaw_radps = 0.15f;
@@ -71,4 +76,6 @@ private:
     FlightState state_ = FlightState::Takeoff;
     std::chrono::steady_clock::time_point state_started_{};
     std::chrono::steady_clock::time_point target_hold_started_{};
+    std::chrono::steady_clock::time_point last_target_seen_{};
+    VisionTarget last_target_{};
 };

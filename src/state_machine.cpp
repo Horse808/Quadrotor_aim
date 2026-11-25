@@ -12,6 +12,8 @@ void FlightStateMachine::reset() {
     state_ = FlightState::Takeoff;
     state_started_ = std::chrono::steady_clock::now();
     target_hold_started_ = {};
+    last_target_seen_ = {};
+    last_target_ = {};
 }
 
 const char* FlightStateMachine::stateName() const {
@@ -36,6 +38,10 @@ void FlightStateMachine::changeState(FlightState next,
     state_ = next;
     state_started_ = now;
     target_hold_started_ = {};
+    if (next == FlightState::Search) {
+        last_target_seen_ = {};
+        last_target_ = {};
+    }
 }
 
 float FlightStateMachine::clamp(float value, float limit) const {
@@ -70,7 +76,9 @@ FcCommand FlightStateMachine::update(const FcState& fc,
                 break;
             }
             const float height = fc.height_valid ? fc.height_m : fc.optical_flow_distance_m;
-            if (!std::isfinite(height) || height < 0.01f) {
+            // 地面上的有效相对高度可以为 0，不要求先达到最小离地高度才起飞。
+            // 仍拒绝非有限值及无效负值，并在下方保留起飞目标高度判断。
+            if (!std::isfinite(height) || height < 0.0f) {
                 changeState(FlightState::Failsafe, now);
                 break;
             }
@@ -85,6 +93,8 @@ FcCommand FlightStateMachine::update(const FcState& fc,
 
         case FlightState::Search: {
             if (target.valid) {
+                last_target_ = target;
+                last_target_seen_ = now;
                 changeState(FlightState::Track, now);
                 break;
             }
@@ -94,39 +104,69 @@ FcCommand FlightStateMachine::update(const FcState& fc,
                 changeState(FlightState::Land, now);
                 break;
             }
-            // 搜索过程用光流测距值把高度拉回目标高度，避免旋转期间掉高。
-            const float height_error = config_.search_height_m - fc.optical_flow_distance_m;
-            command.vz = clamp(-config_.height_gain * height_error,
-                               config_.max_vertical_speed_mps);
-            // 搜索时只绕偏航轴旋转，不叠加前后或左右速度，避免目标
-            // 不在视野内时产生无法验证的水平位移。
+            // GLOBAL_POSITION_INT.relative_alt 是相对起飞点高度，优先用它稳高；
+            // 遥测短暂不可用时，才回退到有效的光流测距高度。
+            const float height = fc.height_valid ? fc.height_m : fc.optical_flow_distance_m;
+            if (!std::isfinite(height) || height < 0.0f) {
+                changeState(FlightState::Failsafe, now);
+                break;
+            }
+            const float height_error = config_.search_height_m - height;
+            // 容差外使用起飞速度修正高度；容差内持续发送向上的垂直速度。
+            // 两种速度互相覆盖，不叠加，也不再由高度增益缩小。
+            if (std::abs(height_error) > config_.height_tolerance_m) {
+                // BODY_NED 的 +Z 向下，低于目标高度时输出负 vz 上升。
+                command.vz = height_error > 0.0f
+                                 ? -config_.takeoff_speed_mps
+                                 : config_.takeoff_speed_mps;
+            } else {
+                // 配置为正的速度大小；BODY_NED 的向上速度需要取负号。
+                command.vz = -config_.max_vertical_speed_mps;
+            }
             command.vyaw = config_.max_search_yaw_radps;
             break;
         }
 
         case FlightState::Track: {
-            if (!target.valid) {
-                changeState(FlightState::Search, now);
-                break;
+            if (target.valid) {
+                last_target_ = target;
+                last_target_seen_ = now;
+            } else {
+                const auto hold_duration = std::chrono::duration_cast<
+                    std::chrono::steady_clock::duration>(
+                    std::chrono::duration<float>(config_.target_loss_hold_seconds));
+                if (last_target_seen_ == std::chrono::steady_clock::time_point{} ||
+                    now - last_target_seen_ > hold_duration) {
+                    changeState(FlightState::Search, now);
+                    break;
+                }
             }
-            const float distance_error = target.z_m - config_.target_distance_m;
-            command.vx = clamp(-config_.position_gain * distance_error,
-                               config_.max_forward_speed_mps);
-            command.vy = clamp(-config_.position_gain * target.x_m,
-                               config_.max_lateral_speed_mps);
+            const VisionTarget& active_target = target.valid ? target : last_target_;
+            const float distance_error = active_target.z_m - config_.target_distance_m;
+            const float horizontal_angle = std::atan2(active_target.x_m, active_target.z_m);
 
-            // 相机朝机头前方时，目标 y 坐标就是机体的上下误差：
-            // y > 0 表示目标在画面下方，机体应向下（NED 的 +Z）修正。
-            // 跟踪阶段优先把 ArUco 码对准画面中心，避免只满足距离和左右
-            // 误差却仍然处在目标的斜上方或斜下方。
-            command.vz = clamp(config_.vertical_gain * target.y_m,
-                               config_.max_vertical_speed_mps);
+            // 转向、靠近和到位等待时持续发送向上的配置垂直速度；
+            // 下方的视觉上下对齐控制仍会覆盖此值，不叠加两种速度。
+            command.vz = -config_.max_vertical_speed_mps;
+
+            // 先調整目標的上下角度，使灯中心与机体高度对齐；垂直误差进入
+            // 容差后再通过偏航旋转把灯转到画面中心，最后才前后靠近。
+            if (std::abs(active_target.y_m) > config_.vertical_tolerance_m) {
+                command.vz = clamp(config_.vertical_gain * active_target.y_m,
+                                   config_.max_vertical_speed_mps);
+            } else if (std::abs(active_target.x_m) > config_.lateral_tolerance_m) {
+                command.vyaw = clamp(-horizontal_angle,
+                                     config_.max_search_yaw_radps);
+            } else {
+                command.vx = clamp(-config_.position_gain * distance_error,
+                                   config_.max_forward_speed_mps);
+            }
 
             const bool in_position = std::abs(distance_error) <=
                                          config_.target_distance_tolerance_m &&
-                                     std::abs(target.x_m) <= config_.lateral_tolerance_m &&
-                                     std::abs(target.y_m) <= config_.vertical_tolerance_m;
-            if (in_position) {
+                                     std::abs(active_target.x_m) <= config_.lateral_tolerance_m &&
+                                     std::abs(active_target.y_m) <= config_.vertical_tolerance_m;
+            if (target.valid && in_position) {
                 if (target_hold_started_ == std::chrono::steady_clock::time_point{}) {
                     target_hold_started_ = now;
                 } else if (now - target_hold_started_ >=
@@ -135,6 +175,7 @@ FcCommand FlightStateMachine::update(const FcState& fc,
                     changeState(FlightState::Land, now);
                 }
             } else {
+                // 位置稳定计时只接受实时识别，丢帧期间不累计稳定时间。
                 target_hold_started_ = {};
             }
             break;
@@ -149,7 +190,7 @@ FcCommand FlightStateMachine::update(const FcState& fc,
                 break;
             }
             if (optical_height <= config_.landing_height_m) {
-                // 主程序在正常模式下看到 land_done 后发送 disarm；测试模式
+                // 主程序在正常模式下看到 land_done 后发送强制停桨指令；测试模式
                 // 只结束状态机，不发送任何停桨/解锁相关命令。
                 command.land_done = true;
                 changeState(FlightState::Finished, now);

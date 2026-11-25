@@ -1,5 +1,6 @@
 #include "camera.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -13,6 +14,8 @@
 #include <unistd.h>
 
 #include <sample_comm.h>
+#include <cvi_ae.h>
+#include <cvi_isp.h>
 #include <cvi_buffer.h>
 #include <cvi_sys.h>
 #include <cvi_vi.h>
@@ -32,6 +35,93 @@ struct Camera::Impl {
         (void)device_id;
         output_format_ = output_format;
         return openLicheeRV(width, height, fps, output_width, output_height);
+    }
+
+    bool configureExposureFromFile(const std::string& config_path) {
+        if (!opened) {
+            setError("设置曝光前必须先打开相机");
+            return false;
+        }
+
+        int exposure_time_us = 0;
+        try {
+            cv::FileStorage config(config_path, cv::FileStorage::READ);
+            if (!config.isOpened()) {
+                setError("无法打开相机曝光配置：" + config_path);
+                return false;
+            }
+            const cv::FileNode node = config["exposure_time_us"];
+            // 旧配置没有此项时仍使用自动曝光，避免影响既有部署。
+            if (!node.empty()) {
+                if (!node.isInt()) {
+                    setError("exposure_time_us 必须是非负整数，单位为微秒");
+                    return false;
+                }
+                node >> exposure_time_us;
+                if (exposure_time_us < 0) {
+                    setError("exposure_time_us 不能为负数");
+                    return false;
+                }
+            }
+        } catch (const cv::Exception& error) {
+            setError("读取相机曝光配置失败：" + std::string(error.what()));
+            return false;
+        }
+
+        // 按 ISP 的真实传感器帧率校验，不能使用 VPSS 缩放后的输出帧率。
+        if (exposure_time_us > 0) {
+            ISP_PUB_ATTR_S pub_attr{};
+            const CVI_S32 rc = CVI_ISP_GetPubAttr(0, &pub_attr);
+            if (rc != CVI_SUCCESS) {
+                setError("CVI_ISP_GetPubAttr 失败：" + std::to_string(rc));
+                return false;
+            }
+            if (!std::isfinite(pub_attr.f32FrameRate) || pub_attr.f32FrameRate <= 0.0f) {
+                setError("ISP 传感器帧率无效，无法校验曝光时间");
+                return false;
+            }
+            const double frame_time_us = 1000000.0 / pub_attr.f32FrameRate;
+            if (exposure_time_us > frame_time_us) {
+                setError("exposure_time_us 超过传感器单帧时间上限（微秒）：" +
+                         std::to_string(frame_time_us));
+                return false;
+            }
+        }
+
+        // 先读取原属性，只修改曝光模式、时间和手动增益，不覆盖其它 ISP 调校。
+        ISP_EXPOSURE_ATTR_S attr{};
+        CVI_S32 rc = CVI_ISP_GetExposureAttr(0, &attr);
+        if (rc != CVI_SUCCESS) {
+            setError("CVI_ISP_GetExposureAttr 失败：" + std::to_string(rc));
+            return false;
+        }
+        attr.bByPass = CVI_FALSE;
+        attr.enOpType = exposure_time_us == 0 ? OP_TYPE_AUTO : OP_TYPE_MANUAL;
+        if (exposure_time_us > 0) {
+            attr.stManual.enExpTimeOpType = OP_TYPE_MANUAL;
+            attr.stManual.enGainType = AE_TYPE_GAIN;
+            attr.stManual.enAGainOpType = OP_TYPE_MANUAL;
+            attr.stManual.enDGainOpType = OP_TYPE_MANUAL;
+            attr.stManual.enISPDGainOpType = OP_TYPE_MANUAL;
+            attr.stManual.u32ExpTime = static_cast<CVI_U32>(exposure_time_us);
+            // SDK 中 1024 表示 1 倍增益，防止自动增益抵消缩短曝光的效果。
+            attr.stManual.u32AGain = 1024;
+            attr.stManual.u32DGain = 1024;
+            attr.stManual.u32ISPDGain = 1024;
+        }
+        rc = CVI_ISP_SetExposureAttr(0, &attr);
+        if (rc != CVI_SUCCESS) {
+            setError("CVI_ISP_SetExposureAttr 失败：" + std::to_string(rc));
+            return false;
+        }
+        if (exposure_time_us == 0) {
+            std::fprintf(stderr, "[相机] 已设置自动曝光\n");
+        } else {
+            std::fprintf(stderr, "[相机] 已请求手动曝光：%d 微秒，各级增益为 1 倍\n",
+                         exposure_time_us);
+        }
+        last_error.clear();
+        return true;
     }
 
     bool readGray(cv::Mat& out_gray, int timeout_ms) {
@@ -565,6 +655,10 @@ bool Camera::open(int device_id,
     return impl_->open(device_id, width, height, fps, output_width, output_height, output_format);
 }
 
+
+bool Camera::configureExposureFromFile(const std::string& config_path) {
+    return impl_->configureExposureFromFile(config_path);
+}
 
 bool Camera::readGray(cv::Mat& out_gray, int timeout_ms) {
     return impl_->readGray(out_gray, timeout_ms);

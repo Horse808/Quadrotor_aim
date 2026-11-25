@@ -31,6 +31,9 @@ public:
               int output_width = 0,
               int output_height = 0,
               OutputFormat output_format = OutputFormat::Nv21);
+    // 相机打开后调用；读取曝光时间，缺省或 0 为自动，正整数为微秒。
+    // 手动模式固定各级增益为 1 倍；参数或 ISP 设置失败时返回 false。
+    bool configureExposureFromFile(const std::string& config_path);
     bool readGray(cv::Mat& out_gray, int timeout_ms = 1000);         // 读取一帧图像的 Y 平面
     bool readBgr(cv::Mat& out_bgr, int timeout_ms = 1000);            // 读取一帧并转换为 BGR
     void close();                                                    // 关闭相机，释放所有硬件资源

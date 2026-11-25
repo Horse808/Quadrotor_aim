@@ -222,6 +222,11 @@ int main() {
         std::cerr << "[相机] 打开失败：" << camera.lastError() << '\n';
         return 1;
     }
+    if (!camera.configureExposureFromFile("config/camera_config.yaml")) {
+        std::cerr << "[相机] 曝光配置失败：" << camera.lastError() << '\n';
+        camera.close();
+        return 1;
+    }
     if (!camera.usesHardwareScaledOutput()) {
         std::cerr << "[相机] VPSS 硬件缩放不可用，停止测试以避免 CPU 回退造成帧率下降。"
                   << "请检查初始化日志及上次程序的资源释放情况。\n";

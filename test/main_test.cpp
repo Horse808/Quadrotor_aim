@@ -1,5 +1,6 @@
 #include "ArUco_detector.hpp"
 #include "camera.hpp"
+#include "camera_intrinsics.hpp"
 #include "communicate.hpp"
 #include "state_machine.hpp"
 
@@ -88,29 +89,13 @@ bool readCameraMatrix(cv::Mat& matrix, cv::Mat& dist_coeffs) {
         std::cerr << "[main] 无法读取 config/camera_config.yaml\n";
         return false;
     }
-    file["camera_matrix"] >> matrix;
     file["dist_coeffs"] >> dist_coeffs;
-    cv::FileNode width_node = file["input_width"];
-    cv::FileNode height_node = file["input_height"];
-    if (matrix.empty() || dist_coeffs.empty() || width_node.empty() || height_node.empty()) {
-        std::cerr << "[main] 相机内参、畸变参数或处理输入尺寸缺失。\n";
+    // 与引导灯主程序共用缩放规则，不能把处理尺寸当成内参的标定尺寸。
+    if (dist_coeffs.empty() ||
+        !readScaledCameraMatrix(file, cv::Size(kOutputWidth, kOutputHeight), matrix)) {
+        std::cerr << "[main] 相机内参、畸变参数或标定分辨率无效。\n";
         return false;
     }
-    const int configured_width = static_cast<int>(width_node);
-    const int configured_height = static_cast<int>(height_node);
-    if (configured_width <= 0 || configured_height <= 0 ||
-        matrix.rows != 3 || matrix.cols != 3) {
-        std::cerr << "[main] 相机内参尺寸无效。\n";
-        return false;
-    }
-    // 配置中的矩阵已经按 config input_width/input_height 缩放；当前算法图像为 320x180。
-    const double sx = static_cast<double>(kOutputWidth) / configured_width;
-    const double sy = static_cast<double>(kOutputHeight) / configured_height;
-    if (matrix.type() != CV_64F) matrix.convertTo(matrix, CV_64F);
-    matrix.at<double>(0, 0) *= sx;
-    matrix.at<double>(0, 2) *= sx;
-    matrix.at<double>(1, 1) *= sy;
-    matrix.at<double>(1, 2) *= sy;
     return true;
 }
 
@@ -270,8 +255,8 @@ int main(int argc, char** argv) {
             // 只有正常模式允许自动停桨；测试模式即使进入 FINISHED 也不
             // 发送解锁/停桨命令，避免误操作实机。此时通信线程仍持续发送零速度。
             disarm_attempted = true;
-            std::cout << "[main] 光流高度低于 10 cm，发送停桨命令。\n";
-            if (!fc.disarm(5000)) {
+            std::cout << "[main] 光流高度达到停桨阈值，发送强制停桨命令。\n";
+            if (!fc.disarm(5000, true)) {
                 std::cerr << "[main] 停桨命令未被飞控确认，请立即人工接管。\n";
             }
         }

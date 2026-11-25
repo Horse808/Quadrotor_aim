@@ -1,4 +1,5 @@
 #include "camera.hpp"
+#include "camera_intrinsics.hpp"
 #include "communicate.hpp"
 #include "light_detector.hpp"
 #include "state_machine.hpp"
@@ -46,7 +47,8 @@ bool readNumber(const cv::FileStorage& file, const char* key, float& value) {
     return std::isfinite(value);
 }
 
-bool loadConfig(const std::string& fly_path, RuntimeConfig& config) {
+bool loadConfig(const std::string& fly_path, const std::string& camera_path,
+                RuntimeConfig& config) {
     cv::FileStorage fly(fly_path, cv::FileStorage::READ);
     if (!fly.isOpened()) {
         std::cerr << "[配置] 无法打开飞行配置文件：" << fly_path << '\n';
@@ -65,7 +67,12 @@ bool loadConfig(const std::string& fly_path, RuntimeConfig& config) {
     ok &= readNumber(fly, "takeoff_height_m", config.flight.takeoff_height_m);
     ok &= readNumber(fly, "takeoff_speed_mps", config.flight.takeoff_speed_mps);
     ok &= readNumber(fly, "search_height_m", config.flight.search_height_m);
+    ok &= readNumber(fly, "height_tolerance_m", config.flight.height_tolerance_m);
     ok &= readNumber(fly, "search_timeout_seconds", config.flight.search_timeout_seconds);
+    // 新增参数兼容旧配置：未配置时使用状态机默认值。
+    if (!readNumber(fly, "target_loss_hold_seconds", config.flight.target_loss_hold_seconds)) {
+        config.flight.target_loss_hold_seconds = StateMachineConfig{}.target_loss_hold_seconds;
+    }
     float yaw_deg_s = 0.0f;
     ok &= readNumber(fly, "search_yaw_speed_deg_s", yaw_deg_s);
     config.flight.max_search_yaw_radps = yaw_deg_s * static_cast<float>(CV_PI / 180.0);
@@ -85,30 +92,20 @@ bool loadConfig(const std::string& fly_path, RuntimeConfig& config) {
     ok &= readNumber(fly, "light_diameter_m", config.light_diameter_m);
     ok &= readNumber(fly, "log_interval_seconds", config.log_interval_seconds);
 
-    cv::FileStorage camera("config/camera_config.yaml", cv::FileStorage::READ);
+    cv::FileStorage camera(camera_path, cv::FileStorage::READ);
     if (!camera.isOpened()) {
-        std::cerr << "[配置] 无法打开 config/camera_config.yaml\n";
+        std::cerr << "[配置] 无法打开相机配置文件：" << camera_path << '\n';
         return false;
     }
     cv::Mat matrix;
-    camera["camera_matrix"] >> matrix;
-    if (matrix.empty() || matrix.rows != 3 || matrix.cols != 3) {
-        std::cerr << "[配置] camera_matrix 缺失或格式错误。\n";
+    if (!readScaledCameraMatrix(camera, cv::Size(kImageWidth, kImageHeight), matrix)) {
+        std::cerr << "[配置] 相机内参或其对应的标定分辨率无效。\n";
         return false;
     }
-    if (matrix.type() != CV_64F) matrix.convertTo(matrix, CV_64F);
-    const int width = static_cast<int>(camera["input_width"]);
-    const int height = static_cast<int>(camera["input_height"]);
-    if (width <= 0 || height <= 0) {
-        std::cerr << "[配置] 相机输入尺寸无效。\n";
-        return false;
-    }
-    const double sx = static_cast<double>(kImageWidth) / width;
-    const double sy = static_cast<double>(kImageHeight) / height;
-    config.focal_x_px = static_cast<float>(matrix.at<double>(0, 0) * sx);
-    config.focal_y_px = static_cast<float>(matrix.at<double>(1, 1) * sy);
-    config.principal_x_px = static_cast<float>(matrix.at<double>(0, 2) * sx);
-    config.principal_y_px = static_cast<float>(matrix.at<double>(1, 2) * sy);
+    config.focal_x_px = static_cast<float>(matrix.at<double>(0, 0));
+    config.focal_y_px = static_cast<float>(matrix.at<double>(1, 1));
+    config.principal_x_px = static_cast<float>(matrix.at<double>(0, 2));
+    config.principal_y_px = static_cast<float>(matrix.at<double>(1, 2));
     if (!std::isfinite(config.focal_x_px) || config.focal_x_px <= 0.0f ||
         !std::isfinite(config.focal_y_px) || config.focal_y_px <= 0.0f ||
         !std::isfinite(config.principal_x_px) || !std::isfinite(config.principal_y_px)) {
@@ -130,7 +127,10 @@ bool loadConfig(const std::string& fly_path, RuntimeConfig& config) {
     const auto positive = [](float v) { return std::isfinite(v) && v > 0.0f; };
     if (!ok || !positive(config.flight.takeoff_height_m) ||
         !positive(config.flight.takeoff_speed_mps) || !positive(config.flight.search_height_m) ||
-        !positive(config.flight.search_timeout_seconds) || !positive(config.flight.max_search_yaw_radps) ||
+        !positive(config.flight.search_timeout_seconds) ||
+        !std::isfinite(config.flight.target_loss_hold_seconds) ||
+        config.flight.target_loss_hold_seconds < 0.0f || config.flight.target_loss_hold_seconds > 10.0f ||
+        !positive(config.flight.max_search_yaw_radps) ||
         !positive(config.flight.target_distance_m) || !positive(config.flight.hold_seconds) ||
         !positive(config.flight.max_forward_speed_mps) || !positive(config.flight.max_lateral_speed_mps) ||
         !positive(config.flight.max_vertical_speed_mps) || !positive(config.flight.landing_speed_mps) ||
@@ -140,6 +140,7 @@ bool loadConfig(const std::string& fly_path, RuntimeConfig& config) {
         config.communication.send_rate_hz > 100 || config.communication.command_timeout_ms < 100 ||
         config.communication.command_timeout_ms > 5000 ||
         config.flight.target_distance_tolerance_m < 0.0f || config.flight.lateral_tolerance_m < 0.0f ||
+        config.flight.height_tolerance_m < 0.0f ||
         config.flight.vertical_tolerance_m < 0.0f ||
         !std::isfinite(config.flight.position_gain) || config.flight.position_gain <= 0.0f ||
         !std::isfinite(config.flight.vertical_gain) || config.flight.vertical_gain <= 0.0f ||
@@ -183,20 +184,30 @@ VisionTarget makeTarget(const LightResult& light, const RuntimeConfig& config) {
 
 int main(int argc, char** argv) {
     bool normal_mode = false;
-    std::string config_path = "config/fly_config.yaml";
+    std::string config_dir = "config";
+    std::string config_path;
     for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
         if (arg == "--normal") normal_mode = true;
         else if (arg == "--test") normal_mode = false;
-        else if (arg == "--config" && i + 1 < argc) config_path = argv[++i];
+        else if ((arg == "--config" || arg == "--config-dir") && i + 1 < argc &&
+                 argv[i + 1][0] != '\0' && std::string(argv[i + 1]).rfind("--", 0) != 0) {
+            if (arg == "--config-dir") config_dir = argv[++i];
+            else config_path = argv[++i];
+        }
         else {
-            std::cerr << "用法：main [--test|--normal] [--config 配置文件]\n";
+            std::cerr << "用法：main [--test|--normal] [--config-dir 配置目录] [--config 飞行配置文件]\n";
             return 2;
         }
     }
 
+    // 两个配置文件共用指定目录；保留 --config 单独覆盖飞行配置的旧用法。
+    const std::string config_prefix = config_dir.back() == '/' ? config_dir : config_dir + '/';
+    if (config_path.empty()) config_path = config_prefix + "fly_config.yaml";
+    const std::string camera_config_path = config_prefix + "camera_config.yaml";
+
     RuntimeConfig config;
-    if (!loadConfig(config_path, config)) return 2;
+    if (!loadConfig(config_path, camera_config_path, config)) return 2;
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
     std::cout << "[主程序] " << (normal_mode ? "正常模式" : "测试模式（不切模式、不解锁、不停桨）") << '\n'
@@ -206,6 +217,11 @@ int main(int argc, char** argv) {
     Camera camera;
     if (!camera.open(0, kSensorWidth, kSensorHeight, kSensorFps, kImageWidth, kImageHeight)) {
         std::cerr << "[相机] 打开失败：" << camera.lastError() << '\n';
+        return 1;
+    }
+    if (!camera.configureExposureFromFile(camera_config_path)) {
+        std::cerr << "[相机] 曝光配置失败：" << camera.lastError() << '\n';
+        camera.close();
         return 1;
     }
     if (!camera.usesHardwareScaledOutput()) {
